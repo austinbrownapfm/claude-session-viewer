@@ -6,7 +6,15 @@
  *   npx tsx sessions.ts [--watch <path>...]
  *
  * Default watch paths are loaded from ~/.claude/session-viewer.json:
- *   { "watchPaths": ["/your/project/path", ...] }
+ *   {
+ *     "watchPaths": [
+ *       "/plain/path",
+ *       { "path": "/another/path", "name": "nickname" }
+ *     ]
+ *   }
+ *
+ * Each entry can be a plain string or an object with an optional "name" field
+ * that overrides the tab label (e.g. "backend" instead of "grace").
  *
  * If no config exists, all sessions across ~/.claude/projects/ are shown.
  *
@@ -33,8 +41,27 @@ const CONFIG_FILE = path.join(HOME, ".claude", "session-viewer.json");
 const PAGE_SIZE = 15;
 const SUMMARY_LENGTH = 90;
 
+type WatchPathEntry = string | { path: string; name?: string };
+
 interface Config {
-  watchPaths?: string[];
+  watchPaths?: WatchPathEntry[];
+}
+
+interface WatchPath {
+  path: string;
+  name: string; // nickname or auto-derived from path
+}
+
+function resolveEntry(entry: WatchPathEntry): WatchPath {
+  if (typeof entry === "string") return { path: entry, name: deriveName(entry) };
+  return { path: entry.path, name: entry.name ?? deriveName(entry.path) };
+}
+
+function deriveName(p: string): string {
+  const normalized = p.replace(/^\/Users\/[^/]+/, "~");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length === 1 && parts[0] === "~") return "home";
+  return parts[parts.length - 1];
 }
 
 function loadConfig(): Config {
@@ -46,16 +73,23 @@ function loadConfig(): Config {
 }
 
 // CLI --watch flags take priority; fall back to config; fall back to scan all
-const cliWatchPaths: string[] = [];
+const cliWatchPaths: WatchPath[] = [];
 for (let i = 2; i < process.argv.length; i++) {
   if (process.argv[i] === "--watch" && process.argv[i + 1]) {
-    cliWatchPaths.push(process.argv[++i]);
+    const p = process.argv[++i];
+    cliWatchPaths.push({ path: p, name: deriveName(p) });
   }
 }
 
 const config = loadConfig();
-const configWatchPaths: string[] = config.watchPaths ?? [];
-const watchPaths: string[] = [...new Set([...cliWatchPaths, ...configWatchPaths])];
+const configWatchPaths: WatchPath[] = (config.watchPaths ?? []).map(resolveEntry);
+
+// Dedupe by path, CLI entries win
+const seen = new Map<string, WatchPath>();
+for (const w of [...cliWatchPaths, ...configWatchPaths]) {
+  if (!seen.has(w.path)) seen.set(w.path, w);
+}
+const watchPaths: WatchPath[] = [...seen.values()];
 
 // If no paths configured, fall back to showing all projects
 const SCAN_ALL = watchPaths.length === 0;
@@ -84,13 +118,9 @@ function projectDirNameToPath(dirName: string): string {
   return dirName.replace(/-/g, "/").replace(/^\//, "/");
 }
 
-/** Shorten a path for display: ~/Desktop/code/grace → grace */
-function tabLabel(p: string): string {
-  const normalized = p.replace(/^\/Users\/[^/]+/, "~");
-  const parts = normalized.split("/").filter(Boolean);
-  // "~" alone → "home", otherwise last segment
-  if (parts.length === 1 && parts[0] === "~") return "home";
-  return parts[parts.length - 1];
+/** Tab label is always the resolved nickname. */
+function tabLabel(w: WatchPath): string {
+  return w.name;
 }
 
 function shortProject(p: string): string {
@@ -141,7 +171,7 @@ function extractSummary(filePath: string): string {
 
 function loadSessions(): Session[] {
   const sessions: Session[] = [];
-  const seen = new Set<string>();
+  const seenFiles = new Set<string>();
 
   const scanProjectDir = (projectDir: string, projectPath: string) => {
     let files: string[];
@@ -151,8 +181,8 @@ function loadSessions(): Session[] {
       return;
     }
     for (const file of files) {
-      if (seen.has(file)) continue;
-      seen.add(file);
+      if (seenFiles.has(file)) continue;
+      seenFiles.add(file);
       const fullPath = path.join(projectDir, file);
       try {
         const stat = fs.statSync(fullPath);
@@ -179,8 +209,8 @@ function loadSessions(): Session[] {
       }
     } catch {}
   } else {
-    for (const p of watchPaths) {
-      scanProjectDir(path.join(PROJECTS_ROOT, pathToProjectDirName(p)), p);
+    for (const w of watchPaths) {
+      scanProjectDir(path.join(PROJECTS_ROOT, pathToProjectDirName(w.path)), w.path);
     }
   }
 
@@ -215,7 +245,7 @@ function formatAge(d: Date): string {
 function renderTabs(activeTab: number, sessionCounts: number[]) {
   if (SCAN_ALL) return;
 
-  const tabs = ["All", ...watchPaths.map(tabLabel)];
+  const tabs = ["All", ...watchPaths.map(tabLabel)];  // tabLabel uses nickname
   const parts = tabs.map((label, i) => {
     const count = sessionCounts[i] ?? 0;
     const text  = ` ${label} (${count}) `;
@@ -292,8 +322,8 @@ async function main() {
   // Sessions visible in current tab (before text filter)
   const tabSessions = (tab: number): Session[] => {
     if (SCAN_ALL || tab === 0) return allSessions;
-    const p = watchPaths[tab - 1];
-    return allSessions.filter((s) => s.projectPath === p);
+    const w = watchPaths[tab - 1];
+    return allSessions.filter((s) => s.projectPath === w.path);
   };
 
   // Sessions after both tab and text filter

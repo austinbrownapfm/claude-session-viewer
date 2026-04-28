@@ -55,19 +55,20 @@ npx tsx sessions.ts --watch ~/Desktop/code/myproject
 
 ### Personal config
 
-Create `~/.claude/session-viewer.json` to set your default watch paths:
+Create `~/.claude/session-viewer.json` to set your default watch paths. Each entry can be a plain path string, or an object with an optional `name` field that sets the tab label:
 
 ```json
 {
   "watchPaths": [
     "/Users/you/Desktop/code/myproject",
-    "/Users/you/Desktop/code/another-project",
-    "/Users/you"
+    { "path": "/Users/you/Desktop/code/myproject/backend", "name": "backend" },
+    { "path": "/Users/you/Desktop/code/myproject/frontend", "name": "frontend" },
+    { "path": "/Users/you", "name": "home" }
   ]
 }
 ```
 
-Without a config file (or watch flags), all sessions across `~/.claude/projects/` are shown.
+Without a `name`, the tab label is derived from the last segment of the path. Without a config file (or watch flags), all sessions across `~/.claude/projects/` are shown.
 
 ## Controls
 
