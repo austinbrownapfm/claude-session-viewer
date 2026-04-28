@@ -1,0 +1,13 @@
+{
+  "name": "claude-session-viewer",
+  "version": "1.0.0",
+  "description": "Interactive TUI for browsing and resuming Claude Code sessions",
+  "bin": {
+    "claude-sessions": "./sessions.ts"
+  },
+  "scripts": {
+    "start": "npx tsx sessions.ts"
+  },
+  "keywords": ["claude", "claude-code", "cli", "tui", "sessions"],
+  "license": "MIT"
+}
