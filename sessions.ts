@@ -11,12 +11,13 @@
  * If no config exists, all sessions across ~/.claude/projects/ are shown.
  *
  * Controls:
- *   ↑↓         Navigate sessions
- *   PgUp/PgDn  Page through results
- *   /          Filter by project or summary text
- *   Enter      Copy resume command to clipboard
- *   r          Reload sessions from disk
- *   q / Esc    Quit
+ *   ↑↓           Navigate sessions
+ *   Tab/Shift+Tab Switch between folder tabs
+ *   PgUp/PgDn    Page through results
+ *   /            Filter by project or summary text
+ *   Enter        Copy resume command to clipboard
+ *   r            Reload sessions from disk
+ *   q / Esc      Quit
  */
 
 import fs from "fs";
@@ -78,11 +79,24 @@ function pathToProjectDirName(projectPath: string): string {
   return projectPath.replace(/[^a-zA-Z0-9]/g, "-");
 }
 
-/** Reverse: decode a ~/.claude/projects/ dir name back to a best-guess path.
- *  This is lossy (any non-alphanumeric char becomes "-") but good enough for display. */
+/** Reverse: decode a ~/.claude/projects/ dir name back to a best-guess path. */
 function projectDirNameToPath(dirName: string): string {
-  // Leading "-" → leading "/"
   return dirName.replace(/-/g, "/").replace(/^\//, "/");
+}
+
+/** Shorten a path for display: ~/Desktop/code/grace → grace */
+function tabLabel(p: string): string {
+  const normalized = p.replace(/^\/Users\/[^/]+/, "~");
+  const parts = normalized.split("/").filter(Boolean);
+  // "~" alone → "home", otherwise last segment
+  if (parts.length === 1 && parts[0] === "~") return "home";
+  return parts[parts.length - 1];
+}
+
+function shortProject(p: string): string {
+  const normalized = p.replace(/^\/Users\/[^/]+/, "~");
+  const parts = normalized.split("/");
+  return parts.slice(-2).join("/");
 }
 
 function extractSummary(filePath: string): string {
@@ -136,11 +150,9 @@ function loadSessions(): Session[] {
     } catch {
       return;
     }
-
     for (const file of files) {
       if (seen.has(file)) continue;
       seen.add(file);
-
       const fullPath = path.join(projectDir, file);
       try {
         const stat = fs.statSync(fullPath);
@@ -159,21 +171,16 @@ function loadSessions(): Session[] {
   };
 
   if (SCAN_ALL) {
-    // No config — show everything
     try {
       for (const dirName of fs.readdirSync(PROJECTS_ROOT)) {
         const projectDir = path.join(PROJECTS_ROOT, dirName);
         if (!fs.statSync(projectDir).isDirectory()) continue;
         scanProjectDir(projectDir, projectDirNameToPath(dirName));
       }
-    } catch {
-      // projects root missing
-    }
+    } catch {}
   } else {
-    // Scan only configured paths
     for (const p of watchPaths) {
-      const dirName = pathToProjectDirName(p);
-      scanProjectDir(path.join(PROJECTS_ROOT, dirName), p);
+      scanProjectDir(path.join(PROJECTS_ROOT, pathToProjectDirName(p)), p);
     }
   }
 
@@ -188,7 +195,8 @@ const DIM    = "\x1b[2m";
 const CYAN   = "\x1b[36m";
 const GREEN  = "\x1b[32m";
 const YELLOW = "\x1b[33m";
-const BG_SEL = "\x1b[48;5;236m";
+const BG_TAB = "\x1b[48;5;238m";  // active tab bg
+const BG_SEL = "\x1b[48;5;236m";  // selected row bg
 const CLEAR  = "\x1b[2J\x1b[H";
 
 function formatAge(d: Date): string {
@@ -202,18 +210,28 @@ function formatAge(d: Date): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
-function shortProject(p: string): string {
-  const normalized = p.replace(/^\/Users\/[^/]+/, "~");
-  const parts = normalized.split("/");
-  return parts.slice(-2).join("/");
+// Tabs: index 0 = "All", 1..N = watchPaths[0..N-1]
+// Only rendered when watchPaths has entries.
+function renderTabs(activeTab: number, sessionCounts: number[]) {
+  if (SCAN_ALL) return;
+
+  const tabs = ["All", ...watchPaths.map(tabLabel)];
+  const parts = tabs.map((label, i) => {
+    const count = sessionCounts[i] ?? 0;
+    const text  = ` ${label} (${count}) `;
+    return i === activeTab
+      ? `${BG_TAB}${BOLD}${CYAN}${text}${RESET}`
+      : `${DIM}${text}${RESET}`;
+  });
+
+  process.stdout.write(parts.join(DIM + "│" + RESET) + "\n");
 }
 
-function renderHeader(total: number, page: number, pages: number, filter: string, scanAll: boolean) {
+function renderHeader(total: number, page: number, pages: number, filter: string) {
   const cols = process.stdout.columns || 100;
-  const mode = scanAll ? `${DIM}(all projects)${RESET}` : `${DIM}(configured paths)${RESET}`;
   process.stdout.write(
     `${BOLD}${CYAN} Claude Sessions${RESET}  ` +
-    `${DIM}${total} sessions · page ${page + 1}/${pages}${RESET}  ${mode}` +
+    `${DIM}${total} sessions · page ${page + 1}/${pages}${RESET}` +
     (filter ? `  ${YELLOW}filter: ${filter}${RESET}` : "") +
     "\n" +
     `${DIM}${"─".repeat(cols)}${RESET}\n`
@@ -221,17 +239,14 @@ function renderHeader(total: number, page: number, pages: number, filter: string
 }
 
 function renderRow(s: Session, selected: boolean) {
-  const prefix = selected ? `${BG_SEL}${BOLD}${GREEN} ▶ ${RESET}${BG_SEL}` : `   `;
-  const suffix = selected ? RESET : "";
-
+  const prefix  = selected ? `${BG_SEL}${BOLD}${GREEN} ▶ ${RESET}${BG_SEL}` : `   `;
+  const suffix  = selected ? RESET : "";
   const age     = formatAge(s.mtime).padEnd(8);
   const proj    = shortProject(s.projectPath).padEnd(32);
   const size    = `${s.sizeMB.toFixed(1)}MB`.padStart(7);
   const idShort = s.id.slice(0, 8);
-
   const meta    = `${DIM}${age} ${proj} ${size} ${idShort}${RESET}`;
   const summary = selected ? `${BOLD}${s.summary}${RESET}` : `${DIM}${s.summary}${RESET}`;
-
   process.stdout.write(`${prefix}${meta}${suffix}\n`);
   process.stdout.write(`${prefix}   ${summary}${suffix}\n`);
 }
@@ -245,51 +260,65 @@ function renderFooter(selected: Session | null, message: string) {
   } else {
     process.stdout.write("\n");
   }
+  const tabHint = SCAN_ALL ? "" : ` · Tab/⇧Tab switch folder`;
   process.stdout.write(
-    `${DIM}↑↓ navigate · PgUp/PgDn page · / filter · Enter copy · r reload · q quit${RESET}\n`
+    `${DIM}↑↓ navigate · PgUp/PgDn page · / filter${tabHint} · Enter copy · r reload · q quit${RESET}\n`
   );
-  if (message) {
-    process.stdout.write(`\n${YELLOW}${message}${RESET}\n`);
-  }
+  if (message) process.stdout.write(`\n${YELLOW}${message}${RESET}\n`);
 }
 
 function copyToClipboard(text: string): boolean {
-  try {
-    // macOS
-    execSync(`echo ${JSON.stringify(text)} | pbcopy`);
-    return true;
-  } catch {}
-  try {
-    // Linux (xclip)
-    execSync(`echo ${JSON.stringify(text)} | xclip -selection clipboard`);
-    return true;
-  } catch {}
-  try {
-    // Linux (xsel)
-    execSync(`echo ${JSON.stringify(text)} | xsel --clipboard --input`);
-    return true;
-  } catch {}
+  for (const cmd of [
+    `echo ${JSON.stringify(text)} | pbcopy`,
+    `echo ${JSON.stringify(text)} | xclip -selection clipboard`,
+    `echo ${JSON.stringify(text)} | xsel --clipboard --input`,
+  ]) {
+    try { execSync(cmd); return true; } catch {}
+  }
   return false;
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  let sessions  = loadSessions();
-  let filter    = "";
-  let cursor    = 0;
-  let page      = 0;
+  let allSessions: Session[] = loadSessions();
+  let filter     = "";
+  let cursor     = 0;
+  let page       = 0;
+  let activeTab  = 0;  // 0 = All, 1..N = watchPaths index
   let mode: "browse" | "filter" = "browse";
-  let message   = "";
+  let message    = "";
 
-  const getFiltered = () =>
-    filter
-      ? sessions.filter(
-          (s) =>
-            s.summary.toLowerCase().includes(filter.toLowerCase()) ||
-            s.projectPath.toLowerCase().includes(filter.toLowerCase())
-        )
-      : sessions;
+  // Sessions visible in current tab (before text filter)
+  const tabSessions = (tab: number): Session[] => {
+    if (SCAN_ALL || tab === 0) return allSessions;
+    const p = watchPaths[tab - 1];
+    return allSessions.filter((s) => s.projectPath === p);
+  };
+
+  // Sessions after both tab and text filter
+  const getFiltered = (): Session[] => {
+    const base = tabSessions(activeTab);
+    if (!filter) return base;
+    const q = filter.toLowerCase();
+    return base.filter(
+      (s) =>
+        s.summary.toLowerCase().includes(q) ||
+        s.projectPath.toLowerCase().includes(q)
+    );
+  };
+
+  // Count per tab for display
+  const sessionCounts = (): number[] =>
+    [0, ...watchPaths.map((_, i) => i + 1)].map((i) => tabSessions(i).length);
+
+  const switchTab = (delta: number) => {
+    const tabCount = SCAN_ALL ? 1 : watchPaths.length + 1;
+    activeTab = (activeTab + delta + tabCount) % tabCount;
+    cursor = 0;
+    page   = 0;
+    filter = "";
+  };
 
   const render = () => {
     const filtered = getFiltered();
@@ -299,10 +328,11 @@ async function main() {
     cursor         = Math.min(cursor, Math.max(0, visible.length - 1));
 
     process.stdout.write(CLEAR);
-    renderHeader(filtered.length, page, pages, filter, SCAN_ALL);
-    visible.forEach((s, i) => renderRow(s, i === cursor));
+    renderHeader(filtered.length, page, pages, filter);
+    renderTabs(activeTab, sessionCounts());
+    process.stdout.write("\n");
 
-    // Stable height
+    visible.forEach((s, i) => renderRow(s, i === cursor));
     for (let i = visible.length; i < PAGE_SIZE; i++) process.stdout.write("\n\n");
 
     renderFooter(visible[cursor] ?? null, message);
@@ -317,11 +347,13 @@ async function main() {
   process.stdin.on("keypress", (str, key) => {
     if (mode === "filter") {
       if (key.name === "escape" || key.name === "return") {
-        mode = "browse";
-        cursor = 0;
-        page = 0;
+        mode = "browse"; cursor = 0; page = 0;
       } else if (key.name === "backspace") {
         filter = filter.slice(0, -1);
+      } else if (key.name === "tab") {
+        // Allow tabbing out of filter mode
+        mode = "browse"; cursor = 0; page = 0;
+        switchTab(key.shift ? -1 : 1);
       } else if (str && !key.ctrl && !key.meta) {
         filter += str;
       }
@@ -337,17 +369,14 @@ async function main() {
       process.stdout.write(RESET + "\n");
       process.exit(0);
     } else if (key.name === "escape") {
-      filter = "";
-      cursor = 0;
-      page   = 0;
+      if (filter) { filter = ""; cursor = 0; page = 0; }
+      else if (activeTab !== 0) switchTab(-activeTab);
     } else if (str === "/" || key.name === "slash") {
-      mode   = "filter";
-      filter = "";
+      mode = "filter"; filter = "";
+    } else if (key.name === "tab") {
+      switchTab(key.shift ? -1 : 1);
     } else if (key.name === "r") {
-      sessions = loadSessions();
-      cursor   = 0;
-      page     = 0;
-      message  = "Reloaded.";
+      allSessions = loadSessions(); cursor = 0; page = 0; message = "Reloaded.";
     } else if (key.name === "up") {
       if (cursor > 0) cursor--;
       else if (page > 0) { page--; cursor = PAGE_SIZE - 1; }
@@ -355,18 +384,14 @@ async function main() {
       if (cursor < visible.length - 1) cursor++;
       else if (page < pages - 1) { page++; cursor = 0; }
     } else if (key.name === "pageup") {
-      page   = Math.max(0, page - 1);
-      cursor = 0;
+      page = Math.max(0, page - 1); cursor = 0;
     } else if (key.name === "pagedown") {
-      page   = Math.min(pages - 1, page + 1);
-      cursor = 0;
+      page = Math.min(pages - 1, page + 1); cursor = 0;
     } else if (key.name === "return") {
       const sel = visible[cursor];
       if (sel) {
         const cmd = `cd '${sel.projectPath}' && claude --resume ${sel.id}`;
-        message = copyToClipboard(cmd)
-          ? `Copied: ${cmd}`
-          : `Resume: ${cmd}`;
+        message = copyToClipboard(cmd) ? `Copied: ${cmd}` : `Resume: ${cmd}`;
       }
     }
 
@@ -374,7 +399,4 @@ async function main() {
   });
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+main().catch((e) => { console.error(e); process.exit(1); });
